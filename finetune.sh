@@ -1,0 +1,11 @@
+python src/finetune.py \
+    --device 0 \
+    --dataset "PCBA" \
+    --runseed 0 \
+    --task "classification" \
+    --metric "roc_auc_score" \
+    --num_run 5 \
+    --num-epochs 20 \
+    --num-workers 0 \
+    --frozen \
+    --input_model_file "./log/BACE_model_300epoch.pt"

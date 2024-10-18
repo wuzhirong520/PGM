@@ -1,0 +1,6 @@
+conda create -n PGM python=3.8
+conda activate PGM
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0
+pip install packaging pyyaml pydantic
+pip install dgl -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+pip install rdkit dgllife
