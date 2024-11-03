@@ -16,6 +16,7 @@ from tqdm import tqdm
 from dataset import load_dataset, DATASET_INFO
 import wandb
 
+ENABLE_WANDB_LOGGING = True
 
 def train(args, epoch, model, data_loader, loss_criterion, optimizer, device):
     model.train()
@@ -77,11 +78,11 @@ def main(args, dataset, run_name, device):
         torch.cuda.manual_seed_all(args.seed)
 
     train_set, val_set, test_set = split_dataset(args, dataset)
-    train_loader = DataLoader(dataset=train_set, batch_size=1024*4, shuffle=True,
+    train_loader = DataLoader(dataset=train_set, batch_size=args.batch_size, shuffle=True,
                               collate_fn=collate_molgraphs, num_workers=args.num_workers)
-    val_loader = DataLoader(dataset=val_set, batch_size=1024*4,
+    val_loader = DataLoader(dataset=val_set, batch_size=args.batch_size,
                             collate_fn=collate_molgraphs, num_workers=args.num_workers)
-    test_loader = DataLoader(dataset=test_set, batch_size=1024*4,
+    test_loader = DataLoader(dataset=test_set, batch_size=args.batch_size,
                              collate_fn=collate_molgraphs, num_workers=args.num_workers)
 
     model = GINPredictor(num_node_emb_list=[119, 4],
@@ -92,9 +93,19 @@ def main(args, dataset, run_name, device):
                          dropout=0.2,
                          readout='mean',
                          n_tasks=dataset.n_tasks)
+    if args.load_ckpt_path is not None:
+        pretrained = torch.load(args.load_ckpt_path)
+        model_dict = model.state_dict()
+        model_dict.update({k: v for k, v in pretrained.items() if 'gnn' in k})
+        model.load_state_dict(model_dict)
     model.to(device)
+    print(model)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0)
+    model_param_group = []
+    model_param_group.append({"params": model.gnn.parameters(), "lr": (0 if args.freeze_gnn else 0.001)})
+    model_param_group.append({"params": model.predict.parameters(), "lr": 0.001})
+    optimizer = torch.optim.Adam(model_param_group, lr=0.001, weight_decay=0)
+
     if DATASET_INFO[args.dataset]['task'] == 'classification':
         criterion = nn.BCEWithLogitsLoss(reduction='none')
     elif DATASET_INFO[args.dataset]['task'] == 'regression':
@@ -118,7 +129,8 @@ def main(args, dataset, run_name, device):
 
         logs = {"train_score":train_score, "val_score":val_score, "best_val":best_valid, "test_score":test_score}
         progress_bar.set_postfix(**logs)
-        wandb.log(logs)
+        if ENABLE_WANDB_LOGGING:
+            wandb.log(logs)
 
         if (epoch + 1) % args.save_ckpt_step == 0:
             save_dir = os.path.join(str(args.log_path), run_name)
@@ -127,7 +139,7 @@ def main(args, dataset, run_name, device):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Pre-training')
+    parser = argparse.ArgumentParser(description='Pre-training or Fine-tuning')
     parser.add_argument('--device', type=int, default=0,
                         help='which gpu to use if any. (default: 0)')
     parser.add_argument('-d', '--dataset', type=str, default='BACE', choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
@@ -146,16 +158,31 @@ if __name__ == '__main__':
                         help='Maximum number of epochs for pre-training (default: 300)')
     parser.add_argument('--log_path', type=str, default='./log')
     parser.add_argument("-bs","--batch_size", type=int, default=4096)
-    parser.add_argument("--save_ckpt_step", type=int , default=10)
+    parser.add_argument("--save_ckpt_step", type=int , default=1)
+    parser.add_argument("--load_ckpt_path", type=str)
+    parser.add_argument("--freeze_gnn",type=bool, default=False)
+    parser.add_argument("--mode", type=str, default="pretrain", choices=["pretrain","finetune"])
+    parser.add_argument("--finetune_base_dataset", type=str, default='MUV', choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
+                                                    'ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL'])
     args = parser.parse_args()
 
+    print(args)
+
     import time
-    run_name = "pretrain-"+args.dataset+"-"+str((int)(time.time()))
+    if args.mode == "pretrain":
+        run_name = "pretrain-"+args.dataset+"-"+str((int)(time.time()))
+    else:
+        run_name = "finetune-"+args.dataset+"-"+args.finetune_base_dataset+"-"+str((int)(time.time()))
 
     device = torch.device("cuda:" + str(args.device)) if torch.cuda.is_available() else torch.device("cpu")
 
-    wandb.init(project="PGM", name=run_name, config=args)
+    if ENABLE_WANDB_LOGGING:
+        wandb.init(project="PGM", name=run_name, config=args)
 
     dataset = load_dataset(args.dataset)
+    print("Dataset size: ", len(dataset))
 
     main(args, dataset, run_name, device)
+
+    if ENABLE_WANDB_LOGGING:
+        wandb.finish()
