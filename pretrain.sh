@@ -1,9 +1,8 @@
 python src/pretrain.py \
-    --device 0 \
+    --device 1 \
     --dataset "BACE" \
     --seed 0 \
     --task "classification" \
     --metric "roc_auc_score" \
     --num-epochs 300 \
-    --num-workers 0 \
-    --result_path "./log"
+    --num-workers 0 
