@@ -16,6 +16,8 @@ from tqdm import tqdm
 from dataset import load_dataset, DATASET_INFO
 import wandb
 
+ENABLE_WANDB_LOGGING = True
+
 def train(args, epoch, model, data_loader, loss_criterion, optimizer, device):
     model.train()
     train_meter = Meter()
@@ -69,15 +71,11 @@ def evaluation(args, model, data_loader, device):
     return np.mean(eval_meter.compute_metric(DATASET_INFO[args.dataset]['metric']))
 
 
-def main(args):
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+def main(args, dataset, run_name, device):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-
-    dataset = load_dataset(args.dataset)
-    print("Dataset size: ", len(dataset))
 
     train_set, val_set, test_set = split_dataset(args, dataset)
     train_loader = DataLoader(dataset=train_set, batch_size=args.batch_size, shuffle=True,
@@ -95,10 +93,18 @@ def main(args):
                          dropout=0.2,
                          readout='mean',
                          n_tasks=dataset.n_tasks)
+    if args.load_ckpt_path is not None:
+        pretrained = torch.load(args.load_ckpt_path)
+        model_dict = model.state_dict()
+        model_dict.update({k: v for k, v in pretrained.items() if 'gnn' in k})
+        model.load_state_dict(model_dict)
     model.to(device)
     print(model)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=0)
+    model_param_group = []
+    model_param_group.append({"params": model.gnn.parameters(), "lr": (0 if args.freeze_gnn else 0.001)})
+    model_param_group.append({"params": model.predict.parameters(), "lr": 0.001})
+    optimizer = torch.optim.Adam(model_param_group, lr=0.001, weight_decay=0)
 
     if DATASET_INFO[args.dataset]['task'] == 'classification':
         criterion = nn.BCEWithLogitsLoss(reduction='none')
@@ -123,11 +129,11 @@ def main(args):
 
         logs = {"train_score":train_score, "val_score":val_score, "best_val":best_valid, "test_score":test_score}
         progress_bar.set_postfix(**logs)
-        if args.wandb is not None:
+        if ENABLE_WANDB_LOGGING:
             wandb.log(logs)
 
         if (epoch + 1) % args.save_ckpt_step == 0:
-            save_dir = os.path.join(str(args.log_path), args.run_name)
+            save_dir = os.path.join(str(args.log_path), run_name)
             os.makedirs(save_dir, exist_ok=True)
             torch.save(model.state_dict(), os.path.join(save_dir, str(args.dataset) + f'_model_{epoch + 1:05}.pt'))
             if val_score==best_valid:
@@ -135,36 +141,50 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Pre-training')
-    parser.add_argument('--split', type=str, default='scaffold', choices=['scaffold', 'random'],
-                        help='Dataset splitting method (default: scaffold)')
-    parser.add_argument('--split-ratio', type=str, default='0.8,0.1,0.1',
-                        help='Proportion of the dataset to use for training, validation and test (default: 0.8,0.1,0.1)')
-    parser.add_argument('--num-workers', type=int, default=0,
-                        help='Number of processes for data loading (default: 0)')
-
-    parser.add_argument('--dataset', type=str, required=True, choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
-                                                    'ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL'], help='Dataset to use')
+    parser = argparse.ArgumentParser(description='Pre-training or Fine-tuning')
+    parser.add_argument('--device', type=int, default=0,
+                        help='which gpu to use if any. (default: 0)')
+    parser.add_argument('-d', '--dataset', type=str, default='BACE', choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
+                                                    'ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL'],
+                        help='Dataset to use')
     parser.add_argument('--seed', type=int, default=24012128,
                         help="Seed for minibatch selection, random initialization.")
-    parser.add_argument('--num-epochs', type=int, default=300,
+    parser.add_argument('-s', '--split', type=str, default='scaffold', choices=['scaffold', 'random'],
+                        help='Dataset splitting method (default: scaffold)')
+    parser.add_argument('-sr', '--split-ratio', type=str, default='0.8,0.1,0.1',
+                        help='Proportion of the dataset to use for training, validation and test (default: 0.8,0.1,0.1)')
+    parser.add_argument('-nw', '--num-workers', type=int, default=0,
+                        help='Number of processes for data loading (default: 0)')
+
+    parser.add_argument('-n', '--num-epochs', type=int, default=300,
                         help='Maximum number of epochs for pre-training (default: 300)')
     parser.add_argument('--log_path', type=str, default='./log')
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=0.001)
+    parser.add_argument("-bs","--batch_size", type=int, default=4096)
     parser.add_argument("--save_ckpt_step", type=int , default=1)
-    parser.add_argument('--run_name', type=str, required=True)
-    parser.add_argument("--wandb", action='store_true')
-
+    parser.add_argument("--load_ckpt_path", type=str)
+    parser.add_argument("--freeze_gnn",type=bool, default=False)
+    parser.add_argument("--mode", type=str, default="pretrain", choices=["pretrain","finetune"])
+    parser.add_argument("--finetune_base_dataset", type=str, default='MUV', choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
+                                                    'ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL'])
     args = parser.parse_args()
+
     print(args)
-    os.makedirs(args.log_path, exist_ok=True)
 
-    
-    if args.wandb is not None:
-        wandb.init(project="PGM", name=args.run_name, config=args)
+    import time
+    if args.mode == "pretrain":
+        run_name = "pretrain-"+args.dataset+"-"+str((int)(time.time()))
+    else:
+        run_name = "finetune-"+args.dataset+"-"+args.finetune_base_dataset+"-"+str((int)(time.time()))
 
-    main(args)
+    device = torch.device("cuda:" + str(args.device)) if torch.cuda.is_available() else torch.device("cpu")
 
-    if args.wandb is not None:
+    if ENABLE_WANDB_LOGGING:
+        wandb.init(project="PGM", name=run_name, config=args)
+
+    dataset = load_dataset(args.dataset)
+    print("Dataset size: ", len(dataset))
+
+    main(args, dataset, run_name, device)
+
+    if ENABLE_WANDB_LOGGING:
         wandb.finish()
