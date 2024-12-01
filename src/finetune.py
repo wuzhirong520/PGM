@@ -3,20 +3,20 @@
 # adapted from
 # https://github.com/awslabs/dgl-lifesci/blob/master/examples/property_prediction/moleculenet/classification.py
 
+import os
 import argparse
 import numpy as np
-import random
 import torch
 import torch.nn as nn
-from dgllife.utils import PretrainAtomFeaturizer
-from dgllife.utils import PretrainBondFeaturizer
-from dgllife.utils import Meter, SMILESToBigraph
+from dgllife.utils import Meter
 from dgllife.model.model_zoo.gin_predictor import GINPredictor
 from torch.utils.data import DataLoader
 from utils import split_dataset, collate_molgraphs
+from tqdm import tqdm
+from dataset import load_dataset, DATASET_INFO
+import wandb
 
-
-def train(args, epoch, model, data_loader, loss_criterion, optimizer, device, run_idx):
+def train(args, epoch, model, data_loader, loss_criterion, optimizer, device):
     model.train()
     train_meter = Meter()
     for batch_id, batch_data in enumerate(data_loader):
@@ -36,7 +36,6 @@ def train(args, epoch, model, data_loader, loss_criterion, optimizer, device, ru
             bg.edata.pop('bond_direction_type').to(device)
         ]
         logits = model(bg, node_feats, edge_feats)
-
         loss = (loss_criterion(logits, labels) * (masks != 0).float()).mean()
 
         optimizer.zero_grad()
@@ -45,9 +44,8 @@ def train(args, epoch, model, data_loader, loss_criterion, optimizer, device, ru
 
         train_meter.update(logits, labels, masks)
 
-    train_score = np.mean(train_meter.compute_metric(args.metric))
-    print('run {:d}, epoch {:d}/{:d}, training {} {:.4f}'.format(
-        run_idx + 1, epoch + 1, args.num_epochs, args.metric, train_score))
+    train_score = np.mean(train_meter.compute_metric(DATASET_INFO[args.dataset]['metric']))
+    return train_score
 
 
 def evaluation(args, model, data_loader, device):
@@ -68,168 +66,114 @@ def evaluation(args, model, data_loader, device):
             ]
             logits = model(bg, node_feats, edge_feats)
             eval_meter.update(logits, labels, masks)
-    return np.mean(eval_meter.compute_metric(args.metric))
+    return np.mean(eval_meter.compute_metric(DATASET_INFO[args.dataset]['metric']))
 
 
-def main(args, dataset, device):
-    # run multiple times
-    for run_idx in range(args.num_run):
-        print('\nRun ', run_idx + 1)
-        if args.runseed:
-            runseed = args.runseed
-            print('Manual runseed: ', runseed)
-        else:
-            runseed = random.randint(0, 10000)
-            print('Random runseed: ', runseed)
-        torch.manual_seed(runseed)
-        np.random.seed(runseed)
+def main(args):
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
-        train_set, val_set, test_set = split_dataset(args, dataset)
-        train_loader = DataLoader(dataset=train_set, batch_size=32, shuffle=True,
-                                  collate_fn=collate_molgraphs, num_workers=args.num_workers)
-        val_loader = DataLoader(dataset=val_set, batch_size=32,
-                                collate_fn=collate_molgraphs, num_workers=args.num_workers)
-        test_loader = DataLoader(dataset=test_set, batch_size=32,
-                                 collate_fn=collate_molgraphs, num_workers=args.num_workers)
+    dataset = load_dataset(args.dataset)
+    print("Dataset size: ", len(dataset))
 
-        model = GINPredictor(num_node_emb_list=[119, 4],
-                             num_edge_emb_list=[6, 3],
-                             num_layers=2,
-                             emb_dim=300,
-                             JK='last',
-                             dropout=0.2,
-                             readout='mean',
-                             n_tasks=dataset.n_tasks)
+    train_set, val_set, test_set = split_dataset(args, dataset)
+    train_loader = DataLoader(dataset=train_set, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=collate_molgraphs, num_workers=args.num_workers)
+    val_loader = DataLoader(dataset=val_set, batch_size=args.batch_size,
+                            collate_fn=collate_molgraphs, num_workers=args.num_workers)
+    test_loader = DataLoader(dataset=test_set, batch_size=args.batch_size,
+                             collate_fn=collate_molgraphs, num_workers=args.num_workers)
 
-        if args.input_model_file != '':
-            pretrained = torch.load(args.input_model_file)
-            model_dict = model.state_dict()
-            model_dict.update({k: v for k, v in pretrained.items() if 'gnn' in k})
-            model.load_state_dict(model_dict)
-        model.to(device)
+    model = GINPredictor(num_node_emb_list=[119, 4],
+                         num_edge_emb_list=[6, 3],
+                         num_layers=2,
+                         emb_dim=300,
+                         JK='last',
+                         dropout=0.2,
+                         readout='mean',
+                         n_tasks=dataset.n_tasks)
+    if args.load_ckpt_path is not None:
+        pretrained = torch.load(args.load_ckpt_path)
+        model_dict = model.state_dict()
+        model_dict.update({k: v for k, v in pretrained.items() if 'gnn' in k})
+        model.load_state_dict(model_dict)
+    model.to(device)
+    print(model)
 
-        model_param_group = []
-        if args.frozen:
-            model_param_group.append({"params": model.gnn.parameters(), "lr": 0})
-        model_param_group.append({"params": model.predict.parameters(), "lr": 0.001})
-        optimizer = torch.optim.Adam(model_param_group, lr=0.001, weight_decay=0)
+    model_param_group = []
+    model_param_group.append({"params": model.gnn.parameters(), "lr": (0 if args.freeze_gnn else args.learning_rate)})
+    model_param_group.append({"params": model.predict.parameters(), "lr": args.learning_rate})
+    optimizer = torch.optim.Adam(model_param_group, lr=args.learning_rate, weight_decay=0)
 
-        if args.task == 'classification':
-            criterion = nn.BCEWithLogitsLoss(reduction='none')
-        elif args.task == 'regression':
-            criterion = nn.SmoothL1Loss(reduction='none')
-        else:
-            raise ValueError("Invalid task type.")
+    if DATASET_INFO[args.dataset]['task'] == 'classification':
+        criterion = nn.BCEWithLogitsLoss(reduction='none')
+    elif DATASET_INFO[args.dataset]['task'] == 'regression':
+        criterion = nn.SmoothL1Loss(reduction='none')
+    else:
+        raise ValueError("Invalid task type.")
 
-        for epoch in range(0, args.num_epochs):
-            train(args, epoch, model, train_loader, criterion, optimizer, device, run_idx)
-            val_score = evaluation(args, model, val_loader, device)
-            print('run {:d}, epoch {:d}/{:d}, validation {} {:.4f}'.format(
-                run_idx + 1, epoch + 1, args.num_epochs, args.metric, val_score))
+    progress_bar = tqdm(
+        range(0, args.num_epochs),
+        desc="Steps"
+    )
 
-            test_score = evaluation(args, model, test_loader, device)
-            print('run {:d}, epoch {:d}/{:d}, test {} {:.4f}'.format(
-                run_idx + 1, epoch + 1, args.num_epochs, args.metric, test_score))
+    best_valid = 0
+    for epoch in range(0, args.num_epochs):
+        progress_bar.update(1)
+        train_score = train(args, epoch, model, train_loader, criterion, optimizer, device)
+        val_score = evaluation(args, model, val_loader, device)
+        if val_score > best_valid:
+            best_valid = val_score
+        test_score = evaluation(args, model, test_loader, device)
 
+        logs = {"train_score":train_score, "val_score":val_score, "best_val":best_valid, "test_score":test_score}
+        progress_bar.set_postfix(**logs)
+        if args.wandb:
+            wandb.log(logs)
+
+        if (epoch + 1) % args.save_ckpt_step == 0:
+            save_dir = os.path.join(str(args.log_path), args.run_name)
+            os.makedirs(save_dir, exist_ok=True)
+            torch.save(model.state_dict(), os.path.join(save_dir, str(args.dataset) + f'_model_{epoch + 1:05}.pt'))
+            if val_score==best_valid:
+                torch.save(model.state_dict(), os.path.join(save_dir, str(args.dataset) + f'_model.pt'))
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Fine-tuning pre-trained models for downstream tasks')
-    parser.add_argument('--device', type=int, default=0,
-                        help='which gpu to use if any. (default: 0)')
-    parser.add_argument('-d', '--dataset', type=str, default='BACE', choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
-                                                    'ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL'],
-                        help='Dataset to use')
-    parser.add_argument('--runseed', type=int, default=None,
-                        help="Seed for minibatch selection, random initialization.")
-    parser.add_argument('-s', '--split', type=str, default='scaffold', choices=['scaffold', 'random'],
+    parser = argparse.ArgumentParser(description='Pre-training')
+    parser.add_argument('--split', type=str, default='scaffold', choices=['scaffold', 'random'],
                         help='Dataset splitting method (default: scaffold)')
-    parser.add_argument('-sr', '--split-ratio', type=str, default='0.8,0.1,0.1',
+    parser.add_argument('--split-ratio', type=str, default='0.8,0.1,0.1',
                         help='Proportion of the dataset to use for training, validation and test (default: 0.8,0.1,0.1)')
-    parser.add_argument('-t', '--task', type=str, default='classification', choices=['classification', 'regression'],
-                        help='task type (default: classification)')
-    parser.add_argument('-me', '--metric', type=str, default='roc_auc_score', choices=['roc_auc_score', 'rmse'],
-                        help='Metric for evaluation (default: roc_auc_score)')
-    parser.add_argument('--num_run', type=int, default=5,
-                        help='number of independent runs (default: 5)')
-    parser.add_argument('-n', '--num-epochs', type=int, default=20,
-                        help='Maximum number of epochs for fine-tuning (default: 20)')
-    parser.add_argument('-nw', '--num-workers', type=int, default=0,
+    parser.add_argument('--num-workers', type=int, default=0,
                         help='Number of processes for data loading (default: 0)')
-    parser.add_argument('--frozen', action='store_true', default=True,
-                        help='whether to freeze gnn extractor')
-    parser.add_argument('-in', '--input_model_file', type=str,
-                        help='filename to input the pre-trained model if there is any.')
+
+    parser.add_argument('--dataset', type=str, required=True, choices=['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER',
+                                                    'ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL'], help='Dataset to use')
+    parser.add_argument('--seed', type=int, default=24012128,
+                        help="Seed for minibatch selection, random initialization.")
+    parser.add_argument('--num-epochs', type=int, default=300,
+                        help='Maximum number of epochs for pre-training (default: 300)')
+    parser.add_argument('--log_path', type=str, default='./log')
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--learning_rate", type=float, default=0.001)
+    parser.add_argument("--save_ckpt_step", type=int , default=1)
+    parser.add_argument('--run_name', type=str, required=True)
+    parser.add_argument("--load_ckpt_path", type=str)
+    parser.add_argument("--freeze_gnn",type=bool, default=False)
+    parser.add_argument("--wandb", action='store_true')
+
     args = parser.parse_args()
+    print(args)
+    os.makedirs(args.log_path, exist_ok=True)
 
-    device = torch.device("cuda:" + str(args.device)) if torch.cuda.is_available() else torch.device("cpu")
+    
+    if args.wandb:
+        wandb.init(project="PGM", name=args.run_name, config=args)
 
-    atom_featurizer = PretrainAtomFeaturizer()
-    bond_featurizer = PretrainBondFeaturizer()
-    smiles_to_g = SMILESToBigraph(add_self_loop=True, node_featurizer=atom_featurizer,
-                                  edge_featurizer=bond_featurizer)
+    main(args)
 
-    if args.dataset == 'MUV':
-        from dgllife.data import MUV
-        dataset = MUV(smiles_to_graph=smiles_to_g,
-                      n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'BACE':
-        from dgllife.data import BACE
-        dataset = BACE(smiles_to_graph=smiles_to_g,
-                       n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'BBBP':
-        from dgllife.data import BBBP
-        dataset = BBBP(smiles_to_graph=smiles_to_g,
-                       n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'ClinTox':
-        from dgllife.data import ClinTox
-        dataset = ClinTox(smiles_to_graph=smiles_to_g,
-                          n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'SIDER':
-        from dgllife.data import SIDER
-        dataset = SIDER(smiles_to_graph=smiles_to_g,
-                        n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'ToxCast':
-        from dgllife.data import ToxCast
-        dataset = ToxCast(smiles_to_graph=smiles_to_g,
-                          n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'HIV':
-        from dgllife.data import HIV
-        dataset = HIV(smiles_to_graph=smiles_to_g,
-                      n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'PCBA':
-        from dgllife.data import PCBA
-        dataset = PCBA(smiles_to_graph=smiles_to_g,
-                       n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'Tox21':
-        from dgllife.data import Tox21
-        dataset = Tox21(smiles_to_graph=smiles_to_g,
-                        n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'FreeSolv':
-        from dgllife.data import FreeSolv
-        dataset = FreeSolv(smiles_to_graph=smiles_to_g,
-                           n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'Lipophilicity':
-        from dgllife.data import Lipophilicity
-        dataset = Lipophilicity(smiles_to_graph=smiles_to_g,
-                                n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    elif args.dataset == 'ESOL':
-        from dgllife.data import ESOL
-        dataset = ESOL(smiles_to_graph=smiles_to_g,
-                       n_jobs=1 if args.num_workers == 0 else args.num_workers)
-
-    else:
-        raise ValueError('Unexpected dataset: {}'.format(args.dataset))
-
-
-    main(args, dataset, device)
+    if args.wandb:
+        wandb.finish()
