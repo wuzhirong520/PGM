@@ -101,8 +101,10 @@ def main(args):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=0)
 
     if DATASET_INFO[args.dataset]['task'] == 'classification':
+        score_inv= 1.0
         criterion = nn.BCEWithLogitsLoss(reduction='none')
     elif DATASET_INFO[args.dataset]['task'] == 'regression':
+        score_inv = -1.0
         criterion = nn.SmoothL1Loss(reduction='none')
     else:
         raise ValueError("Invalid task type.")
@@ -112,14 +114,14 @@ def main(args):
         desc="Steps"
     )
 
-    best_valid = 0
+    best_valid = -999999
     for epoch in range(0, args.num_epochs):
         progress_bar.update(1)
-        train_score = train(args, epoch, model, train_loader, criterion, optimizer, device)
-        val_score = evaluation(args, model, val_loader, device)
+        train_score = train(args, epoch, model, train_loader, criterion, optimizer, device) * score_inv
+        val_score = evaluation(args, model, val_loader, device) * score_inv
         if val_score > best_valid:
             best_valid = val_score
-        test_score = evaluation(args, model, test_loader, device)
+        test_score = evaluation(args, model, test_loader, device) * score_inv
 
         logs = {"train_score":train_score, "val_score":val_score, "best_val":best_valid, "test_score":test_score}
         progress_bar.set_postfix(**logs)
