@@ -4,13 +4,15 @@ from scipy.stats import spearmanr,kendalltau
 datasets = ['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER','ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL']
 
 def printRankString(ranks):
-    for i in range(len(datasets)):
+    for i in range(len(ranks)):
         print([datasets[j] for j in ranks[i]])
     print("")
 
 def get_finetune_ranks():
     ranks = []
     for i in range(len(datasets)):
+        if i!=1:
+            continue
         scores = []
         for j in range(len(datasets)):
             if j==i :
@@ -58,21 +60,27 @@ PGM_ranks =[[0, 7, 5, 6, 8, 4, 10, 3, 1, 2, 11, 9],
             [10, 7, 0, 5, 6, 8, 4, 3, 1, 2, 11, 9], 
             [11, 7, 0, 5, 6, 8, 4, 10, 3, 1, 2, 9]]
 
+PGM_ranks = [PGM_ranks[1]]
+
 printRankString(PGM_ranks)
 
-# finetune_ranks = get_finetune_ranks()
-# printRankString(finetune_ranks)
+finetune_ranks = get_finetune_ranks()
+printRankString(finetune_ranks)
 
 molecule_ranks = get_molecule_ranks()
+
+molecule_ranks = [molecule_ranks[1]]
 printRankString(molecule_ranks)
 
 spearmanr_results = []
 kendalltau_results = []
 
-for i in range(12):
+for i in range(len(PGM_ranks)):
 
-    expected_ranking = PGM_ranks[i]
-    actual_ranking = molecule_ranks[i]
+    # expected_ranking = PGM_ranks[i]
+    expected_ranking = molecule_ranks[i]
+
+    actual_ranking = finetune_ranks[i]
 
     # 值在 -1 和 1 之间，+1 表示完全一致的排序，-1 表示完全相反的排序，0表示没有关联。
     # p值表示相关性是否显著，通常如果p值小于0.05，可以认为相关性是显著的。
@@ -91,9 +99,9 @@ print(spearmanr_results)
 print(kendalltau_results)
 
 spearmanr_avg, kendalltau_avg= 0.0,0.0
-for i in range(12):
+for i in range(len(PGM_ranks)):
     spearmanr_avg+=spearmanr_results[i]
     kendalltau_avg+=kendalltau_results[i]
-spearmanr_avg, kendalltau_avg = spearmanr_avg/12, kendalltau_avg/12
+spearmanr_avg, kendalltau_avg = spearmanr_avg/len(PGM_ranks), kendalltau_avg/len(PGM_ranks)
 print("")
 print(spearmanr_avg, kendalltau_avg)
