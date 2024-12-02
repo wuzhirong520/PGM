@@ -4,6 +4,8 @@
 # https://github.com/awslabs/dgl-lifesci/blob/master/examples/property_prediction/moleculenet/classification.py
 
 import os
+os.environ["OMP_NUM_THREADS"] = "1" # noqa
+os.environ["MKL_NUM_THREADS"] = "1" # noqa
 import argparse
 import numpy as np
 import torch

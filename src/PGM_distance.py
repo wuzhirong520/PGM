@@ -62,7 +62,7 @@ if __name__ == '__main__':
                 continue
             tranfer_map[i,j] = distance(grads[dataset1], grads[dataset2])*scale
 
-    print(tranfer_map)
+    print([list(tranfer_map[i]) for i in range(12)])
 
     ranks = []
     for i in range(n):
