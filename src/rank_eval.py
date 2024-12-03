@@ -2,10 +2,7 @@ import numpy as np
 from scipy.stats import spearmanr,kendalltau
 
 datasets = ['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER','ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL']
-selected_datasets = [0,1,2,3,4,5,6,7,8,9,10,11]
 repeat_finetune_times = 2
-# selected_datasets = [1,2,3,4,8,5,11,9,10,6,0,7]
-# selected_datasets = [1,2,3,4,8,5,11,9,10,6,0]
 
 def printRankString(ranks):
     for i in range(len(ranks)):
@@ -22,9 +19,9 @@ def get_finetune_scores():
     scoreses = []
     for i in range(len(datasets)):
         scores = [0.0 for ii in range(len(datasets))]
-        if i not in selected_datasets:
-            scoreses.append(scores)
-            continue
+        # if i not in selected_datasets:
+        #     scoreses.append(scores)
+        #     continue
         for m in range(repeat_finetune_times):
             for j in range(len(datasets)):
                 if j==i :
@@ -38,7 +35,7 @@ def get_finetune_scores():
 
 def scores_to_ranks(scores):
     ranks = []
-    for i in range(len(datasets)):
+    for i in range(len(scores)):
         rank = list(np.array(scores[i]).argsort())
         # rank.reverse()
         ranks.append(rank)
@@ -86,19 +83,19 @@ finetune_scores = [[999999999.0, 0.7873669323416496, 0.7777836199478221, 0.76998
 
 print("PGM rank")
 PGM_ranks = scores_to_ranks(PGM_scores)
-PGM_ranks = list(np.array(PGM_ranks)[selected_datasets])
+PGM_ranks = list(np.array(PGM_ranks))
 printRankString(PGM_ranks)
 
 print("Finetune rank")
 finetune_scores = get_finetune_scores()
 print_list(finetune_scores)
 finetune_ranks = scores_to_ranks(np.array(finetune_scores)*-1)
-finetune_ranks = list(np.array(finetune_ranks)[selected_datasets])
+finetune_ranks = list(np.array(finetune_ranks))
 printRankString(finetune_ranks)
 
 print("Molecule rank")
 molecule_ranks = scores_to_ranks(np.array(molecule_sims)*-1)
-molecule_ranks = list(np.array(molecule_ranks)[selected_datasets])
+molecule_ranks = list(np.array(molecule_ranks))
 printRankString(molecule_ranks)
 
 
@@ -139,25 +136,49 @@ eval_rank(molecule_ranks, finetune_ranks)
 PGM_scores = np.array(PGM_scores)
 molecule_scores = 1.0 / np.array(molecule_sims)
 
+# def get_best_alpha(PGM_score, molecule_score, finetune_rank):
+#     best_alpha = -1.0
+#     best_score = -1.0
+#     upbound = 4
+#     lowbound = -4
+#     try_times = 4000
+#     for i in range(try_times):
+#         alpha = i/try_times*(upbound-lowbound) + lowbound
+#         mix_scores = PGM_score + molecule_score*alpha
+#         mix_ranks = scores_to_ranks([mix_scores])
+#         spearmanr_avg, kendalltau_avg = eval_rank(mix_ranks, [finetune_rank],False)
+#         if spearmanr_avg > best_score:
+#             best_score = spearmanr_avg
+#             best_alpha = alpha
+#     return best_alpha
+
+# best_alphas = []
+# for i in range(len(datasets)):
+#     best_alphas.append(get_best_alpha(PGM_scores[i],molecule_scores[i],finetune_rank=finetune_ranks[i]))
+    
+# print(best_alphas)
+# best_alphas = np.array(best_alphas)
+
 best_alpha = -1.0
 best_score = -1.0
-for i in range(2000):
-    alpha = i/2000.0*2
+upbound = 3
+lowbound = -3
+try_times = 6000
+for i in range(try_times):
+    alpha = i/try_times*(upbound-lowbound) + lowbound
     mix_scores = PGM_scores + molecule_scores*alpha
     mix_ranks = scores_to_ranks(mix_scores)
-    mix_ranks = list(np.array(mix_ranks)[selected_datasets])
     spearmanr_avg, kendalltau_avg = eval_rank(mix_ranks, finetune_ranks,False)
     if spearmanr_avg > best_score:
         best_score = spearmanr_avg
         best_alpha = alpha
-    
-print(best_alpha,best_score)
+print(best_alpha)
 
 print("Mix: ")
-PGM_scores = np.array(PGM_scores)
-molecule_scores = 1.0 / np.array(molecule_sims)
+# mix_scores = PGM_scores.copy()
+# for i in range(len(datasets)):
+#     mix_scores[i] += molecule_scores[i]*best_alphas[i]
 mix_scores = PGM_scores + molecule_scores*best_alpha
 mix_ranks = scores_to_ranks(mix_scores)
-mix_ranks = list(np.array(mix_ranks)[selected_datasets])
 printRankString(mix_ranks)
 eval_rank(mix_ranks, finetune_ranks)
