@@ -2,7 +2,7 @@ import numpy as np
 from scipy.stats import spearmanr,kendalltau
 
 datasets = ['MUV', 'BACE', 'BBBP', 'ClinTox', 'SIDER','ToxCast', 'HIV', 'PCBA', 'Tox21', 'FreeSolv', 'Lipophilicity', 'ESOL']
-repeat_finetune_times = 2
+repeat_finetune_times = 5
 
 def printRankString(ranks):
     for i in range(len(ranks)):
